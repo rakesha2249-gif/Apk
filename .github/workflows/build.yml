@@ -1,5 +1,4 @@
-
-name: Build Motorola framework APK
+name: Motorola Framework Strict Verification
 
 on:
   workflow_dispatch:
@@ -9,200 +8,76 @@ permissions:
 
 jobs:
   build:
-    name: Build and Verify APK
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Java 17
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Reassemble Original APK
+      - name: Reassemble and verify input
         shell: bash
         run: |
           set -euo pipefail
-
-          cat input/framework-res.apk.part-01 \
-              input/framework-res.apk.part-02 \
-              input/framework-res.apk.part-03 \
-              > framework-res.apk
-
-          echo "APK reassembled"
-          ls -lh framework-res.apk
-
-      - name: Verify Original APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          sha256sum -c input/SHA256SUMS
+          cat input/framework-res.apk.part-01 input/framework-res.apk.part-02 input/framework-res.apk.part-03 > framework-res.apk
+          echo 'da0182cfd30464413e47935c9bed2ef2d0ca40c5b9ece40055cb8e26e0b8eede  framework-res.apk' | sha256sum -c -
           unzip -tqq framework-res.apk
 
-          echo "Original APK verification passed"
-
-      - name: Download Apktool
+      - name: Install Apktool
         shell: bash
         run: |
           set -euo pipefail
-
           python3 - <<'PY'
-          import json
-          import urllib.request
-
-          api = (
-              "https://api.github.com/repos/"
-              "iBotPeaches/Apktool/releases/latest"
-          )
-
-          req = urllib.request.Request(
-              api,
-              headers={
-                  "User-Agent": "Motorola-Framework-Builder"
-              }
-          )
-
-          with urllib.request.urlopen(req) as r:
-              data = json.load(r)
-
-          assets = [
-              a for a in data["assets"]
-              if a["name"].endswith(".jar")
-              and "apktool" in a["name"].lower()
-          ]
-
-          if not assets:
-              raise SystemExit("Apktool JAR not found")
-
-          urllib.request.urlretrieve(
-              assets[0]["browser_download_url"],
-              "apktool.jar"
-          )
-
-          print("Downloaded:", assets[0]["name"])
+          import json, urllib.request
+          req = urllib.request.Request('https://api.github.com/repos/iBotPeaches/Apktool/releases/latest', headers={'User-Agent':'Motorola-Strict-Builder'})
+          with urllib.request.urlopen(req) as response:
+              data = json.load(response)
+          jars = [a for a in data['assets'] if a['name'].lower().startswith('apktool') and a['name'].endswith('.jar')]
+          if len(jars) != 1:
+              raise SystemExit('Cannot uniquely identify Apktool JAR')
+          urllib.request.urlretrieve(jars[0]['browser_download_url'], 'apktool.jar')
           PY
-
           java -jar apktool.jar --version
 
-      - name: Decode Framework APK
-        shell: bash
+      - name: Decode APK
+        run: java -jar apktool.jar d framework-res.apk -o decoded -f
+
+      - name: Snapshot decoded resources
         run: |
-          set -euo pipefail
-
-          java -jar apktool.jar d \
-            framework-res.apk \
-            -o decoded \
-            -f
-
-      - name: Backup Original Strings
-        shell: bash
-        run: |
-          set -euo pipefail
-
           mkdir -p verification
-
-          find decoded/res \
-            -path "*/strings.xml" \
-            -type f \
-            -print \
-            | sort > verification/strings-files.txt
-
           cp -a decoded/res verification/res-before
 
-      - name: Remove Target Message Only
-        shell: bash
+      - name: Patch only target strings
+        run: python3 scripts/patch_strings.py
+
+      - name: Verify decoded edits
+        run: python3 scripts/verify_build.py
+
+      - name: Rebuild unsigned APK
         run: |
-          set -euo pipefail
-
-          python3 scripts/patch_strings.py
-
-      - name: Verify Resource Changes
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p verification
-
-          diff -ru \
-            verification/res-before \
-            decoded/res \
-            > verification/resource-changes.diff \
-            || status=$?
-
-          if [ "${status:-0}" -gt 1 ]; then
-            echo "Resource comparison failed"
-            exit 1
-          fi
-
-          if [ ! -s verification/resource-changes.diff ]; then
-            echo "No resource changes detected"
-            exit 1
-          fi
-
-          echo "Resource changes recorded"
-
-          cat verification/resource-changes.diff
-
-      - name: Rebuild Modified APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
           mkdir -p output
-
-          java -jar apktool.jar b \
-            decoded \
-            -o output/framework-res-modified.apk
-
+          java -jar apktool.jar b decoded -o output/framework-res-modified.apk
           unzip -tqq output/framework-res-modified.apk
 
-      - name: Generate Build Information
-        shell: bash
-        run: |
-          set -euo pipefail
+      - name: Verify APK paths strictly
+        run: python3 scripts/verify_build.py
 
-          sha256sum framework-res.apk \
-            > verification/original-sha256.txt
-
-          sha256sum output/framework-res-modified.apk \
-            > verification/modified-sha256.txt
-
-          unzip -Z1 framework-res.apk \
-            | sort > verification/original-files.txt
-
-          unzip -Z1 output/framework-res-modified.apk \
-            | sort > verification/modified-files.txt
-
-          diff -u \
-            verification/original-files.txt \
-            verification/modified-files.txt \
-            > verification/apk-file-list.diff || true
-
-          ls -lh \
-            framework-res.apk \
-            output/framework-res-modified.apk
-
-          echo "Build completed"
-          echo "Modified APK is NOT signed"
-
-      - name: Upload Modified APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: Motorola-Framework-Modified
-          path: output/framework-res-modified.apk
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Upload Verification Reports
+      - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Motorola-Build-Reports
+          name: Motorola-Verification-Reports
           path: verification/
           if-no-files-found: warn
-          retention-days: 7
+
+      - name: Upload unsigned APK only if checks pass
+        uses: actions/upload-artifact@v4
+        with:
+          name: Motorola-Unsigned-APK-NOT-FOR-FLASHING
+          path: output/framework-res-modified.apk
+          if-no-files-found: error
           
