@@ -1,49 +1,208 @@
+
 name: Build Motorola framework APK
+
 on:
   workflow_dispatch:
+
 permissions:
   contents: read
+
 jobs:
   build:
+    name: Build and Verify APK
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-      - name: Reassemble APK and verify
+
+      - name: Reassemble Original APK
         shell: bash
         run: |
           set -euo pipefail
-          cat input/framework-res.apk.part-* > framework-res.apk
+
+          cat input/framework-res.apk.part-01 \
+              input/framework-res.apk.part-02 \
+              input/framework-res.apk.part-03 \
+              > framework-res.apk
+
+          echo "APK reassembled"
+          ls -lh framework-res.apk
+
+      - name: Verify Original APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
           sha256sum -c input/SHA256SUMS
           unzip -tqq framework-res.apk
+
+          echo "Original APK verification passed"
+
       - name: Download Apktool
         shell: bash
         run: |
           set -euo pipefail
+
           python3 - <<'PY'
-          import json, urllib.request
-          api='https://api.github.com/repos/iBotPeaches/Apktool/releases/latest'
-          req=urllib.request.Request(api,headers={'User-Agent':'Motorola-Framework-APK-Editor'})
-          with urllib.request.urlopen(req) as r: data=json.load(r)
-          assets=[a for a in data['assets'] if a['name'].endswith('.jar') and 'apktool' in a['name'].lower()]
-          if not assets: raise SystemExit('No apktool jar found in latest release')
-          urllib.request.urlretrieve(assets[0]['browser_download_url'],'apktool.jar')
-          print('Using:',assets[0]['name'])
+          import json
+          import urllib.request
+
+          api = (
+              "https://api.github.com/repos/"
+              "iBotPeaches/Apktool/releases/latest"
+          )
+
+          req = urllib.request.Request(
+              api,
+              headers={
+                  "User-Agent": "Motorola-Framework-Builder"
+              }
+          )
+
+          with urllib.request.urlopen(req) as r:
+              data = json.load(r)
+
+          assets = [
+              a for a in data["assets"]
+              if a["name"].endswith(".jar")
+              and "apktool" in a["name"].lower()
+          ]
+
+          if not assets:
+              raise SystemExit("Apktool JAR not found")
+
+          urllib.request.urlretrieve(
+              assets[0]["browser_download_url"],
+              "apktool.jar"
+          )
+
+          print("Downloaded:", assets[0]["name"])
           PY
-      - name: Decode APK
-        run: java -jar apktool.jar d framework-res.apk -o decoded -f
-      - name: Remove target message only
-        run: python3 scripts/patch_strings.py
-      - name: Rebuild APK
+
+          java -jar apktool.jar --version
+
+      - name: Decode Framework APK
+        shell: bash
         run: |
+          set -euo pipefail
+
+          java -jar apktool.jar d \
+            framework-res.apk \
+            -o decoded \
+            -f
+
+      - name: Backup Original Strings
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p verification
+
+          find decoded/res \
+            -path "*/strings.xml" \
+            -type f \
+            -print \
+            | sort > verification/strings-files.txt
+
+          cp -a decoded/res verification/res-before
+
+      - name: Remove Target Message Only
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 scripts/patch_strings.py
+
+      - name: Verify Resource Changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p verification
+
+          diff -ru \
+            verification/res-before \
+            decoded/res \
+            > verification/resource-changes.diff \
+            || status=$?
+
+          if [ "${status:-0}" -gt 1 ]; then
+            echo "Resource comparison failed"
+            exit 1
+          fi
+
+          if [ ! -s verification/resource-changes.diff ]; then
+            echo "No resource changes detected"
+            exit 1
+          fi
+
+          echo "Resource changes recorded"
+
+          cat verification/resource-changes.diff
+
+      - name: Rebuild Modified APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
           mkdir -p output
-          java -jar apktool.jar b decoded -o output/framework-res-modified.apk
-      - name: Upload built APK
+
+          java -jar apktool.jar b \
+            decoded \
+            -o output/framework-res-modified.apk
+
+          unzip -tqq output/framework-res-modified.apk
+
+      - name: Generate Build Information
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sha256sum framework-res.apk \
+            > verification/original-sha256.txt
+
+          sha256sum output/framework-res-modified.apk \
+            > verification/modified-sha256.txt
+
+          unzip -Z1 framework-res.apk \
+            | sort > verification/original-files.txt
+
+          unzip -Z1 output/framework-res-modified.apk \
+            | sort > verification/modified-files.txt
+
+          diff -u \
+            verification/original-files.txt \
+            verification/modified-files.txt \
+            > verification/apk-file-list.diff || true
+
+          ls -lh \
+            framework-res.apk \
+            output/framework-res-modified.apk
+
+          echo "Build completed"
+          echo "Modified APK is NOT signed"
+
+      - name: Upload Modified APK
         uses: actions/upload-artifact@v4
         with:
-          name: framework-res-modified
+          name: Motorola-Framework-Modified
           path: output/framework-res-modified.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Verification Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Motorola-Build-Reports
+          path: verification/
+          if-no-files-found: warn
+          retention-days: 7
           
