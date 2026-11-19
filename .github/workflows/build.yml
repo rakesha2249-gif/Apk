@@ -1,62 +1,49 @@
-name: Motorola Framework Strict Verification v2
+name: Motorola Framework Diagnostics v3
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  build:
+  analyze:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Set up Java
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-      - name: Reassemble and verify original APK
+      - name: Reassemble and validate input
         shell: bash
         run: |
           set -euo pipefail
           cat input/framework-res.apk.part-01 input/framework-res.apk.part-02 input/framework-res.apk.part-03 > framework-res.apk
           echo 'da0182cfd30464413e47935c9bed2ef2d0ca40c5b9ece40055cb8e26e0b8eede  framework-res.apk' | sha256sum -c -
           unzip -tqq framework-res.apk
-      - name: Download Apktool 3.0.3
-        shell: bash
+      - name: Download Apktool
         run: |
-          set -euo pipefail
           curl -fL --retry 3 https://github.com/iBotPeaches/Apktool/releases/download/v3.0.3/apktool_3.0.3.jar -o apktool.jar
           java -jar apktool.jar --version
-      - name: Decode APK
-        run: java -jar apktool.jar d framework-res.apk -o decoded -f
-      - name: Snapshot decoded resources
+      - name: Decode and snapshot
         run: |
+          java -jar apktool.jar d framework-res.apk -o decoded -f
           mkdir -p verification
           cp -a decoded/res verification/res-before
-      - name: Patch target strings
+      - name: Patch English strings
         run: python3 scripts/patch_strings.py
-      - name: Verify source edits
+      - name: Verify source-only edits
         run: python3 scripts/verify_build.py
-      - name: Rebuild unsigned APK for analysis only
+      - name: Rebuild for diagnostics ONLY
         run: |
           mkdir -p output
           java -jar apktool.jar b decoded -o output/framework-res-modified.apk
           unzip -tqq output/framework-res-modified.apk
-      - name: Verify APK paths and critical files
+      - name: Analyze rebuilt resources (expected to fail if different)
         run: python3 scripts/verify_build.py
-      - name: Upload diagnostic reports
+      - name: Upload reports even on failure
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Motorola-Verification-Reports-v2
-          path: |
-            verification/*.txt
-            verification/*.json
+          name: Motorola-Diagnostics-v3
+          path: verification/*.json
           if-no-files-found: warn
-      - name: Upload unsigned APK only if strict checks pass
-        uses: actions/upload-artifact@v4
-        with:
-          name: Motorola-Unsigned-NOT-FOR-FLASHING
-          path: output/framework-res-modified.apk
-          if-no-files-found: error
           
